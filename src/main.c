@@ -226,16 +226,6 @@ void generate(byte *data, struct tally tly[][256]) {
     /* YOUR CODE HERE
      * Perform tallies for used cleartext
      */
-
-    /* REMOVE FOR STUDENTS */
-    for (int i = 0; i < 16; ++i) {
-        ptr  = &tly[i][data[i]];
-        ptr->num++;
-        ptr->ticks += ticks;
-    }
-    total_runs++;
-    total_ticks += ticks;
-    /* REMOVE FOR STUDENTS */
 }
 
 // sets current encryption key and expands it (if PREEMPTIVE_KEYEXPAND is used)
@@ -317,20 +307,6 @@ void calc_means(struct tally tly[][256], double means[][256]) {
      * Each tally struct contains tallies for a byte at a given position (tly[position][cleartext byte])
      * Hint: normalize means by the global mean
      */
-
-    /* REMOVE FOR STUDENTS */
-    struct tally *ptly;
-    double total_avg = (double) total_ticks / total_runs;
-
-    for (int i = 0; i < 16; ++i) {
-        for (int b = 0; b < 256; ++b) {
-            ptly = &tly[i][b];
-            if (ptly->num == 0) continue; // no records made, leave means at zero
-
-            means[i][b] = ptly->ticks / ptly->num - total_avg;
-        }
-    }
-    /* REMOVE FOR STUDENTS */
 }
 
 // prints run count and normalized mean for all key byte values and positions
@@ -394,21 +370,6 @@ void correlate(double means1[][256], double means2[][256], const byte *key, doub
      * The first round of AES uses key XOR input as the state. To properly correlate the timings, you need to mix the key into the indices.
      * Hint: use pearson_correlation_coefficient() above
      */
-
-    /* REMOVE FOR STUDENTS */
-    double a[256], b[256];
-
-    for (int i = 0; i < 16; ++i) {
-        // test all candidate key bytes
-        for (int ckey = 0; ckey < 256; ++ckey) {
-            for (int j = 0; j < 256; ++j) {
-                a[j] = means1[i][j ^ key[i]];
-                b[j] = means2[i][j ^ ckey];
-            }
-            corr[i][ckey] = pearson_correlation_coefficient(a, b);
-        }
-    }
-    /* REMOVE FOR STUDENTS */
 }
 
 // dump sorted (and possibly annotated) correlations to <filename>
