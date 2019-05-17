@@ -1,0 +1,25 @@
+compile: prepare
+	$(CC) $(SOURCES) $(CFLAGS) $(LDFLAGS)
+
+run:
+	$(RUN_PREFIX) $(PYTHON) analyze.py
+
+show:
+	$(PYTHON) analyze.py -g
+
+showcp:
+	$(PYTHON) analyze.py -g cp_data.txt
+
+depinstall:
+	$(PYTHON) -m pip install matplotlib --user
+
+all: compile test
+
+# Clean run with no checkpoints and a new random key
+test: clean gen run
+
+clean:
+	$(DEL) cp_pools.txt cp_data.txt enc_rate.txt
+
+gen:
+	$(PYTHON) genkey.py

@@ -1,0 +1,183 @@
+% xelatex
+\documentclass{article}
+
+\usepackage{graphicx}
+\usepackage[style=iso-numeric, maxcitenames=1, maxbibnames=1]{biblatex}
+\usepackage{url}
+
+\addbibresource{bibliography.bib}
+
+\title{Timing side-channel attack on AES} %doplňte název bakalářské práce
+\author{\small Adam Zahumenský \\\small Supervisor: Ing. Jiří Buček, Ph.D.\\ \small Specialization: Computer Security and Information technology} %doplňte své jméno, jméno vedoucího a svůj studijní obor
+\date{\small Faculty of Information Technology, Czech Technical University in Prague, \\ Thákurova 9, 160 00 Praha 6 \\ \url{zahumada@fit.cvut.cz}}
+
+\begin{document}
+
+\maketitle
+\textbf{}
+%doplňte cca 5--10 klíčových slov
+\paragraph{Keywords}{AES, side-channel attack, timing attack, caches}
+
+\section{Introduction}
+%popis problému, který práce řeší / lze popsat i co práce neřeší :)
+%důvody, proč je zajímavé/důležité se problémem zabývat, přínosy práce
+%popis struktury práce (stručný popis následujících sekcí)
+%návaznost na jiné závěrečné práce
+AES (Advanced Encryption Standard) is a widely used symmetric-key block cipher.
+The Rijndael cipher was standardized as AES by the U.S. National Institute of Standards and Technology (NIST) in 2001.
+It is still considered unbroken and safe for encryption of secret data.
+Given its performance and popularity, AES is widely used in a variety of applications including disk encryption and secure messaging.
+I have chosen to focus solely on AES-128, the simplest AES variant using a 128-bit key.
+
+Several cryptographic attacks on the cipher exist with the latest one only about 4x faster than a brute force attack \cite{bogdanov2011biclique}.
+Given the $2^{128}$ operations a brute-force attack would require, an attack with such speedup is still completely unfeasible on today's computational hardware.
+
+Despite the cipher's resistance to cryptographic attacks, side-channel attacks may be used to break specific implementations.
+Side-channel attacks target implementation flaws and require additional information about the encryption to break the symmetric key.
+In this thesis the targeted side channel is the encryption time.
+If the implementation does not work in constant time, then by timing a sufficient number of encryptions, one may gather information about the secret key.
+
+\textit{``It is extremely difficult to write constant-time high-speed AES software for common general-purpose computers."} Bernstein stated in \cite[Abstract]{bernstein2005cache}.
+A more practical approach is providing direct hardware support for the cipher as is the case with AES-NI instructions for the x86 architecture.
+This makes the implementation much faster and less prone to side-channel attacks as the cryptographic operations are moved away from RAM and caches into dedicated hardware and registers.
+However, hardware support is not omnipresent and software implementations of AES are still critical for systems without such support.
+This is where timing side-channel attacks may pose a threat.
+
+Students learning and implementing the AES cipher rarely secure their code against leaking side channels and in this thesis I demonstrate the severity of the threat.
+To ensure relevance of the attack, I will target the most recent x86 processors used all over the world.
+
+\section{Thesis Goals}
+%specifikujte cíle své BP 
+%cíle práce (hlavní, dílčí) — např. hlavním cílem je návrh, implementace a otestování systému; dílčími cíli může být rešerše stávajících systémů, zmapování možností řešení atd.
+
+The primary goal of this thesis is to research the feasibility of time-based attacks on modern processors with multiple levels of caches.
+If such attack is found feasible, I shall build a program with the intention to test a provided AES-128 implementation for timing attack vulnerability.
+The program shall be built for and tested on both Linux and Windows operating systems.
+It shall be provided in two variants: the base form including the full functionality and the exercise form with fill-in code spots and additional annotations for guidance.
+
+A secondary goal is to test a multitude of implementations and provide comparisons of their vulnerability to such attack.
+
+
+\section{Theoretical Background}
+%navrhněte vhodný název této sekce
+%teoretická část — popis definic a zavedení používaných pojmů/metod atd. 
+%popis dosavadních poznatků k danému problému (kdo a jak problém řešil, k čemu došel, výhody a nevýhody) 
+%tato kapitola prokazuje vaši znalost daného tématu, zde budete nejvíce citovat
+
+AES-128 is a block cipher using the substitution-permutation network design. It accepts a 16B key and a 16B data block and outputs a scrambled 16B data block.
+For simplicity I shall omit AES decryption since it is irrelevant to this thesis. 
+
+The encryption uses 10 rounds each consisting of three sequential steps, SubBytes, ShiftRows and MixColumns, except the last round which omits the MixColumns step.
+The rounds sequentially modify a 4x4-byte matrix called the inner state. This matrix is initially populated by the bitwise XOR of the key and input data.
+The encryption key is first expanded into 10 16B round keys using the Rijndael key schedule algorithm \cite{FIPS}.
+SubBytes uses a 256-byte substitution table ``S-box" to scramble the bytes, ShiftRows rotates each row to the right by a set number of positions and MixColumns multiplies each column of the state by a fixed polynomial over GF$^8$.
+These three steps may be combined into a single step using 4 combined 1024-byte tables called T-boxes \cite{TBOX}.
+
+Each round may then be described as a series of T-box lookups.
+Bernstein speculated that if array lookups are time-dependent on index, \cite[p. 3]{bernstein2005cache} given enough encryptions, one might make correlations between the T-box index and the operation time.
+
+The first round of AES takes the bitwise XOR of the key and data as input, hence the time for the first lookup should be dependent on both the key byte and input byte.
+Bernstein's work successfully correlated the timing data of an unknown key with the timings of a known key using two machines with an identical processor, Intel Pentium III.
+
+Wei Liu et al. tested Bernstein's attack on an Intel Atom N2800, Intel Xeon E5410 and Intel Core i5 with the Atom showing very limited vulnerability, reducing the key space from $2^{128}$ to $2^{112}$ \cite{WEI} .
+The attack was completely unsuccessful on the remaining two CPUs but, considering the unimpressive key space reduction, the Atom was also found practically resistant.
+
+C Ashokkumar et al. used a different type of attack on an Intel Core i3-2100 and Intel Core i7-3770 \cite{ASHOKKUMAR}.
+They successfully used the cache-based Prime+Probe and Flush+Reload techniques to break an AES-128 key.
+In this case the target implementation was not optimized using the T-boxes and instead used the traditional 256-byte S-box.
+Their work proves that the software implementations of AES are vulnerable to cache attacks even on recent processors.
+Similar results were achieved by Liwei Zhang et al. who targeted an Intel Core i5 CPU and again used cache-based attacks to extract the key \cite{ZHANG}.
+
+I found no further successful endeavors using Bernstein's original attack principle, i.e. not using the above-mentioned cache-based attacks.
+
+
+\section{My Work}
+%navrhněte vhodný název této sekce
+%zde je popsán váš přístup k řešení daného problému, odůvodnění zvolených technik, experimenty, výpočty, testování, popis implementace apod.
+%jedná se o tvůrčí část práce — musí být poznat, co je vaše práce
+
+The basis for my work is Bernstein's original attack principle based on index-dependent T-box lookups.
+I used his code and ran it on an Intel Core i5-6300HQ and an Intel Core i5-8600K but failed to obtain conclusive data as expected based on the results of Wei Liu et al. \cite{WEI}.
+Therefore I made several alterations to his approach.
+First, I merged the attacker and victim roles into a single process, eliminating the client-server communication. Considering my goal is to test provided implementations, remote access is not required.
+Second, I calculated the Pearson correlation coefficient instead of plain covariance \cite[pp. 33-35]{bernstein2005cache} to get a more accurate and normalized result when summing the statistics of subsequent runs.
+Third, I did not limit my correlations to a single pair of keys, instead using multiple randomly generated keys to correlate with the target key. This later helped with noise reduction in generated data.
+
+I split the code into an encryption core written in C and an analysing wrapper written in Python 3.
+The core's primary function is including a provided AES-128 implementation written in C. This implementation shall receive an unexpanded 16B key, a 16B data block and an output buffer for storing encrypted data.
+Every block encryption thus entails key expansion followed by the individual AES rounds.
+The goal of the program is to detect correlations between T-box access times and the bitwise XOR of key and input data.
+Since the key expansion itself may affect the timings I only had to use a constant key between the individual runs, making key expansion a constant-time operation.
+
+Similar to Bernstein's work, for each provided key, the target key or a generated one, the core performs a fixed number of random data block encryption measurements.
+The time is measured in CPU ticks using the x86 RDTSC instruction which simply reads the CPU cycle count register.
+This has a critical implication which Bernstein mentioned \cite[p. 21]{bernstein2005cache}: context switches and cache misses caused that way affect the measurements.
+As I only decided to support the Windows and Linux operating systems, none of which are real-time, I had to implement a threshold cutoff to filter out these affected cases.
+It is implemented as a fixed multiple of the mean over a fixed number of encryptions using a single random key and random data blocks.
+Later on I demonstrated that the filter with a sane multiplication constant (5 or 10 in my tests) had a significant impact on reducing noise and was required to gather any meaningful data at all.
+
+The measured timings are captured in 16 tally ``buckets", one for each input block byte position. Each bucket contains 256 slots, one for each byte value.
+Tallies in a given bucket thus represent the total time taken to encrypt data blocks with a certain byte value at the given position.
+The measurements begin with the target key and follow with a fixed number of random keys called test keys.
+Whenever a measurement exceeds the cutoff threshold it is repeated until the tick count passes the filter. It is then added to each of the 16 buckets to the respective byte slots.
+Once the required number of encryptions is done, the core calculates tick count mean per bucket per byte normalized using the global tick count mean.
+
+The next step is correlating each of the test key datasets with the target key dataset testing all 256 byte values as hypothetical key bytes.
+This operation outputs Pearson correlation coefficients but otherwise the principle is identical to Bernstein's work.
+The per-key results are then summed to form the final summary dataset consisting of 16 buckets of 256 values in the interval [-N, N] where N is the number of test keys used.
+
+The summary statistics are then processed by the python wrapper bucket by bucket for excessive peaks.
+These are defined as a fixed multiple of the mean absolute deviation from the global mean of the data stripped of the 32 highest and 32 lowest values.
+The filtered peak indices are then considered candidate bytes for the given bucket per data set. The python wrapper contains a matplotlib routine for visualizing the 16 bucket graphs.
+One may thus quickly assess the vulnerability of their code. A vulnerable code immediately shows visible peaks in certain buckets when measured with sufficient runs (a good value has shown to be $2^{23}$).
+
+The wrapper can run the measurements multiple times to obtain more data and further shrink the candidate key space.
+Byte candidates for a given bucket are defined as the intersection of all peak sets gathered over time for the given bucket or, in case that no such peak set had been found yet, all 256 possible bytes.
+The candidates are kept sorted by their correlation tally.
+
+There is one issue I encountered: the buckets which leak secret data always seem to be the same within a single process.
+Using multiple random keys in the gathering process above thus cannot increase the number of affected buckets.
+This lead me to the theory that memory layout, more specifically, the placement of the T-boxes in memory, affect which buckets leak secret data. Later on this showed to be correct.
+\clearpage
+If ASLR (Address Space Layout Randomization) is present on the machine and affects the data segment, T-box placement in memory is randomized, thus bypassing the above constraint.
+As a result, different runs of the encryption core in sequence may leak different buckets.
+Running the core in a loop eventually leaks all buckets, significantly reducing the candidate key space. If 8 bytes were marked as candidates for all 16 buckets, the resulting key space would be $2^{48}$.
+Although this is still an unfeasible complexity, thanks to the sorting order the correct bytes are frequently found at the beginning of the list.
+This lead me to writing a brute-force algorithm which updates the buckets with the least candidates last.
+
+The less candidates in a bucket the more likely the correct byte is at the front of the list.
+Therefore rotating the candidate bytes in such a bucket is less desirable.
+The wrapper issues a time-limited brute-force attempt every time the candidate key space shrinks once all buckets have been leaked.
+This ensures the key breaking procedure doesn't freeze on a weak candidate list and instead focuses on shrinking the key space before attempting to brute-force again.
+Over time the candidate lists are likely to shrink as more candidate intersections are created.
+
+The program has many tweakable variables including the per-key run count, test key count and timing thresholds which may be tweaked on a per-system basis.
+Immediate graphical feedback is provided by the matplotlib graph display.
+
+Running tests on both Windows and Linux OS with different compiler flags I further observed that ASLR on Windows does not affect the bucket leaks like its Linux counterpart.
+Moreover, with function inlining optimizations disabled, the results were overcome by noise similar to OpenSSL routine's readings.
+With the GCC compiler, turning off predictive commoning added significant noise to the readings, making it much harder if not impossible to extract the peak bytes.
+Hence the vulnerability in my T-box implementation is dependent on compiler flags.
+However, since these flags are always enabled at high optimization levels suitable for production use, this is not a big concern.
+
+
+\section{Conclusions}
+%stručné shrnutí obsahu práce
+%uvedení dosažených výsledků, komentář k využití daného řešení v praxi
+%připomenutí cíle (cílů) a zhodnocení jeho (jejich) naplnění 
+%možné podněty pro navazující práce
+
+I accomplished my goal of writing a program attacking a provided AES-128 implementation using a simple timing attack.
+The program is provided in both of the aforementioned variants.
+The implementations I tested were my personal implementation of AES-128 and the OpenSSL 1.1.1b AES\_encrypt routine.
+I ran the tests on an Intel Core i5-6300HQ (Skylake) and Intel Core i5-8600K (Coffee Lake), both very recent CPUs with large L3 caches.
+The results showed that my T-box AES-128 implementation had significant vulnerabilities which allowed me to extract the whole key on Linux with ASLR enabled and several bytes on Windows.
+I also identified specific OS features and compiler flags affecting the attack.
+I found the OpenSSL implementation resistant to the attack, prompting further research into different approaches to timing attacks which might be effective besides the cache attacks which are known to work \cite{ASHOKKUMAR}.
+
+% ---- Seznam literatury ----
+%jak se dělá seznam literatury si ukážeme na dalším cvičení o LaTeX
+
+\printbibliography[title={References}]
+
+\end{document}

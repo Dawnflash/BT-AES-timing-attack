@@ -1,0 +1,34 @@
+# Supply your implementation here
+OWN_IMPLEMENTATION =
+
+# Set this to 1 to use an OpenSSL implementation instead
+USE_OPENSSL = 0
+OPENSSL_PATH = "C:\Program Files\OpenSSL-Win64"
+# Clear this if you are building OpenSSL from source
+OPENSSL_LIBPATH = lib
+
+# Set this to your python binary
+PYTHON = python
+
+OUT = core.exe
+SOURCES = main.c
+OPTIMIZE = x
+DEL = del
+RUN_PREFIX =
+CFLAGS = /nologo /O$(OPTIMIZE)
+LDFLAGS = /link /OUT:$(OUT)
+
+!IF $(USE_OPENSSL) == 1
+CFLAGS = $(CFLAGS) /DUSE_OPENSSL /I$(OPENSSL_PATH)\include
+SOURCES = $(SOURCES) libcrypto.lib
+LDFLAGS = $(LDFLAGS) /LIBPATH:$(OPENSSL_PATH)\$(OPENSSL_LIBPATH)
+!ELSE
+SOURCES = $(SOURCES) $(OWN_IMPLEMENTATION)
+!ENDIF
+
+include Makefile.in
+
+prepare:
+!IF $(USE_OPENSSL) == 1
+	copy /y $(OPENSSL_PATH)\libcrypto-*.dll .
+!ENDIF

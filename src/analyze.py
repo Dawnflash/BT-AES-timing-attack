@@ -1,0 +1,441 @@
+#! /usr/bin/env python
+
+"""
+Created by Adam Zahumensky <zahumada@fit.cvut.cz> as part of a bachelor thesis on timing side-channel attacks on AES-128 (2019)
+
+This file serves as a wrapper for the encryption core provided in main.c
+Ensure the core is built and AES-128 key is present in aes.key (alternatively set RANDOMIZE_KEY to 1 in main.c) before running this script
+Invoke with -h to see usage options
+"""
+
+import matplotlib.pyplot as plt
+import numpy as np
+from subprocess import run
+import os
+import shutil
+import time
+from sys import argv
+
+# settings
+thresh_mult = 10  # spike detection threshold at N average deviations from the mean
+thresh_cut = 32  # maximum expected number of peak values
+max_pool_size = 8
+# max brute-force time in seconds
+# thanks to weighted sorting and peak pooling the actual times should be significantly lower as more data is leaked
+max_seconds = 15000
+
+# development
+show_max = True  # shows maximum values on graph
+key = [0] * 16
+
+# constants
+corr_fname = "corr.txt"
+bf_fname = "bf.dat"
+checkpoint_fname = "cp_data.txt"
+checkpoint_pools_fname = "cp_pools.txt"
+backup_dir = "bak_corrs"
+main_binary = "./core" if os.name == 'posix' else "core.exe"
+
+
+# save current progress in <checkpoint_fname> (sum of correlations) and <checkpoint_pools_fname> (found pools)
+def check_point(data, pools):
+    f = open(checkpoint_fname, "w")
+
+    for pos in range(16):
+        zp = sorted(zip(range(256), data[pos]), key=lambda x: x[1], reverse=True)
+        ind = [x[0] for x in zp]
+        for byte in ind:
+            f.write(f"{pos} {byte:02x} {data[pos][byte]}\n")
+
+    f.close()
+    f = open(checkpoint_pools_fname, "w")
+    for pos in range(16):
+        if pools[pos].size > 0:
+            f.write(f"{pos}")
+            for byte in pools[pos]:
+                f.write(f" {byte:02x}")
+            f.write("\n")
+    f.close()
+
+
+# get the status of ASLR (address space layout randomization) on the system
+def aslr_status():
+    if os.name == 'posix':
+        f = open("/proc/sys/kernel/randomize_va_space", "r")
+        status = int(f.readline())
+        f.close()
+    elif os.name == 'nt':
+        try:
+            from pefile import PE
+            status = PE(main_binary).OPTIONAL_HEADER.IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE
+            status = 2 if status else 0
+        except ImportError:
+            print("Assuming enabled ASLR, install pefile module to enable per-binary detection")
+            status = 2
+    else:
+        print("Unsupported OS, unable to detect ASLR setting")
+        status = 2
+    return status
+
+
+# print current byte pools to stdout
+def print_pools(pools):
+    print("Byte pools:")
+    for i in range(16):
+        pool = pools[i]
+        if pool.size > 0:
+            print(f"{i:2}:", end='')
+            for byte in pool:
+                print(f" {byte:02x}", end='')
+            print()
+
+
+# get the max time in seconds a brute-force attack would take right now
+def bruteforce_seconds(pools, rate):
+    runs = 1
+    for pool in pools:
+        if pool.size > 0:
+            runs *= pool.size
+        else:
+            runs *= 256
+    return runs / rate
+
+
+# sort byte pools by their correlation sum
+def sort_pools(pools, data):
+    for i in range(16):
+        pool = pools[i]
+        if pool.size > 1:
+            vals = data[i][pool]
+            zp = sorted(zip(range(pool.size), vals), key=lambda x: x[1], reverse=True)
+            ind = [x[0] for x in zp]
+            pools[i] = pool[ind]
+
+
+# create a binary brute-force file with this layout: <#candidates><candidates> for all 16 key byte positions
+# candidates are sorted by their correlation sum
+# if a pool exists for a position, only the pool members are dumped
+def dump_candidates(pools, data):
+    f = open(bf_fname, "wb")
+    for i in range(16):
+        if pools[i].size > 0:
+            ba = pools[i].tolist()
+            lb = len(ba)
+        else:
+            zp = sorted(zip(range(256), data[i]), key=lambda x: x[1], reverse=True)
+            ba = [x[0] for x in zp]
+            lb = 0  # this signals a full 256 line
+        f.write(bytes([lb]))
+        f.write(bytes(ba))
+    f.close()
+
+
+# attempts a brute-force attack with the provided correlation sums and byte pools
+def brute_force(pools, data):
+    print("Attempting to break the key with brute force")
+    dump_candidates(pools, data)
+
+    ret = run(main_binary).returncode
+    if ret != 0:
+        print("Brute force failed")
+    else:
+        print("Brute force successful")
+
+    if os.path.exists(bf_fname):
+        os.remove(bf_fname)
+
+    return ret
+
+
+# invoke the encryption core to generate a new dataset
+def generate(thresh):
+    if os.path.exists(bf_fname):
+        os.remove(bf_fname)
+    if run([main_binary, str(thresh)]).returncode != 0:
+        print("Unable to generate data, bailing out")
+        exit(1)
+
+
+# read and return run statistics generated by Bernstein's study.c program
+def read_bernstein(fname):
+    data = np.zeros((16, 256), dtype=float)
+
+    f = open(fname, "r")
+    for _ in range(4096):
+        line = f.readline().split()
+        pos, byte, val = int(line[0]), int(line[2]), float(line[6])
+        data[pos][byte] += val
+    f.close()
+    return data
+
+
+# read and return a correlation dataset from <fname>
+# checkpoint: read checkpoint_fname (restore from a checkpoint)
+# pools: (use with checkpoint) list to store pools from a checkpoint
+# fname: filename to read from
+# backup: back up <fname> to <backup_dir>
+def read(checkpoint=False, pools=[], fname=None, backup=False):
+    global key
+    data = np.zeros((16, 256), dtype=float)
+
+    # data
+    if not fname:
+        fname = checkpoint_fname if checkpoint else corr_fname
+    try:
+        f = open(fname, "r")
+        for _ in range(4096):
+            line = f.readline().split()
+            pos, byte, val = int(line[0]), int(line[1], 16), float(line[2])
+            if len(line) > 3 and line[3] == '***':
+                key[pos] = byte
+            data[pos][byte] += val
+        f.close()
+    except Exception as e:
+        print(f"Unable to read correlations from {fname}")
+        print(e)
+        exit(1)
+
+    if backup:
+        if not os.path.exists(backup_dir):
+            os.mkdir(backup_dir)
+        bfname_split = fname.split(".")
+        suffix = str(time.time())
+        if len(bfname_split) > 1:
+            bfname = f"{''.join(bfname_split[:-1])}_{suffix}.{bfname_split[-1]}"
+        else:
+            bfname = f"{bfname}_{suffix}"
+        shutil.copy2(fname, os.path.join(backup_dir, bfname))
+
+    # rate and threshold
+    # some defaults
+    rate = 3234030
+    thresh = 1750
+    try:
+        f = open("enc_rate.txt", "r")
+        rate = float(f.readline())
+        thresh = int(f.readline())
+        f.close()
+    except Exception:
+        print("enc_rate.txt not found")
+
+    if checkpoint:
+        try:
+            f = open(checkpoint_pools_fname, "r")
+            for s_line in f:
+                line = s_line.split()
+                pos = int(line[0])
+                vals = np.array([int(x, 16) for x in line[1:]])
+                pools[pos] = vals
+            f.close()
+        except Exception:
+            print("No saved pools found")
+
+    return data, rate, thresh
+
+
+# visualize the provided dataset
+def graph(data):
+    fig = plt.figure(figsize=(20, 12))
+    mn, mx = -1, 1
+
+    # determine min-max
+    for i in range(16):
+        for j in range(256):
+            mn, mx = min(mn, data[i][j]), max(mx, data[i][j])
+
+    # create subplots for each byte of the key
+    for i in range(16):
+        dset = data[i]
+
+        sp = fig.add_subplot(8, 2, i + 1)
+        sp.plot(range(0, 256), dset)
+
+        plt.xlim(0, 256)
+        plt.ylim(mn, mx)
+        if show_max:
+            key[i] = np.argmax(data[i])
+            sp.axvline(x=key[i], ymax=(dset[key[i]] + 1) / (mx - mn), linestyle=":", color="red")
+            sp.axhline(y=dset[key[i]], xmax=key[i] / 256, linestyle=":", color="red")
+
+            plt.xticks([0, 64, 128, 192, 255, key[i]], ['', '', '', '', '', hex(key[i])[2:]])
+            plt.yticks([-1, 0, 1, dset[key[i]]], ['', '', '', f"{dset[key[i]]:.2f}"])
+
+    # show graphs
+    fig.tight_layout()
+    plt.show()
+
+
+# use peak detection on the provided dataset to isolate and return byte pools
+def get_pools(data):
+    tmp = np.array([])
+    pools = [tmp] * 16
+    for i in range(16):
+        dset = data[i]
+        zdset = sorted(zip(range(256), dset), key=lambda x: x[1], reverse=True)
+        sdind, sdset = zip(*zdset)
+
+        # perform data analysis
+        ndset, ndind = np.array(sdset), np.array(sdind)
+        ndset_mean = np.mean(ndset)
+        ndset_cut = ndset[thresh_cut:256 - thresh_cut]
+
+        # calculate MAD without extremes on either end (avg. distance from total mean)
+        mad = np.average(np.abs(ndset_cut - ndset_mean))
+
+        # get indices for excessive extremes (on either side)
+        peak_ind = np.where(np.abs(ndset - ndset_mean) >= mad * thresh_mult)[0]
+        pools[i] = ndind[peak_ind]
+    return pools
+
+
+# fetch new byte pools and intersect them with existing pools
+def analyze_pools(data, all_pools):
+    global thresh_mult
+    thr_bak = thresh_mult
+
+    while True:
+        pools = get_pools(data)  # analyze recent data
+
+        # analysis
+        pool_total = sum([pool.size for pool in pools])
+        pool_count = sum([pool.size > 0 for pool in pools])
+
+        if pool_total > pool_count * max_pool_size:
+            thresh_mult += 1
+            print(f"Pools too broad, bumping mult to {thresh_mult}")
+            continue
+
+        if pool_count == 0:
+            print("No pool found, discarding run")
+            return 1
+
+        break
+    thresh_mult = thr_bak
+
+    print(f"Pools detected for bytes at:", end='')
+    for i in range(16):
+        if pools[i].size > 0:
+            print(f" {i}", end='')
+
+            if all_pools[i].size > 0:
+                all_pools[i] = np.intersect1d(all_pools[i], pools[i])
+            else:
+                all_pools[i] = np.copy(pools[i])  # nothing to intersect, copy a new pool
+            if all_pools[i].size == 0:
+                print("(exhausted)", end='')
+
+    print("\nMissing pools:", end='')
+    for i in range(16):
+        if all_pools[i].size == 0:
+            print(f" {i}", end='')
+    print()
+    return 0
+
+
+# print usage
+def usage():
+    print("analyze.py: run analysis")
+    print("analyze.py -f: run analysis with forced full mode (ignore ASLR settings)")
+    print(f"analyze.py -g [<file>]: visualize the provided correlation file (defaults to {corr_fname})")
+    print("analyze.py -b <file>: visualize the provided timing file generated by Bernstein's original study program")
+    print("analyze.py -h: print this help")
+    exit(0)
+
+
+def main():
+    tmp = np.array([])
+    all_pools = [tmp] * 16  # all runs
+    all_data = np.zeros((16, 256), dtype=float)
+    thresh = 0
+    lite_mode = False
+    skip_gen = False
+
+    if len(argv) > 1:
+        if argv[1] == "-h":
+            usage()
+
+        if argv[1] == "-b":
+            if len(argv) == 2:
+                usage()
+            data = read_bernstein(argv[2])
+            graph(data)
+            return
+
+        if argv[1] == "-g":
+            fname = argv[2] if len(argv) > 2 else corr_fname
+            print(f"Visualizing {fname}")
+            data, _, _ = read(fname=fname)
+            graph(data)
+            return
+
+        if argv[1] == "-f":
+            print("Forcing full mode")
+        elif aslr_status() < 1:
+            print("ASLR not present")
+            print("Enabling lite mode (single run, pool output)")
+            print("Re-run with -f to force full mode")
+            lite_mode = True
+
+    # checkpoint load
+    if os.path.exists(checkpoint_fname):
+        skip_gen = True
+        print("Restoring from checkpoint")
+        all_data, rate, thresh = read(checkpoint=True, pools=all_pools)
+        # only analyze when no pools could be restored
+        should_analyze = True
+        for pool in all_pools:
+            if pool.size > 0:
+                should_analyze = False
+                break
+        if should_analyze:
+            analyze_pools(all_data, all_pools)
+        print_pools(all_pools)
+
+    while True:
+        if not skip_gen:
+            print("Generating data")
+            generate(thresh)  # get new data
+            data, rate, thresh = read(backup=True)  # load the data and do a backup
+
+            # add data to all_data
+            all_data += data
+
+            print("Analyzing data")
+            res = analyze_pools(data, all_pools)
+
+            # sort and print pools
+            sort_pools(all_pools, all_data)
+            print_pools(all_pools)
+
+            if res == 2:
+                graph(all_data)
+                exit(1)
+
+            # save current data
+            check_point(all_data, all_pools)
+
+            if lite_mode:
+                print("Run finished")
+                graph(all_data)
+                return
+
+            if res == 1:
+                continue
+        else:
+            skip_gen = False
+
+        # See if it's time to start brute-forcing
+        # First, see if conditions for preemptive brute-forcing
+        secs = bruteforce_seconds(all_pools, rate)
+        print(f"Brute-force should take {int(secs)}s max (limit: {max_seconds}s max)")
+        if 0 < secs <= max_seconds:
+            ret = brute_force(all_pools, all_data)
+            if ret != 0:
+                print("There was an error in the pools. Modify or delete checkpoint files.")
+            break
+
+    graph(all_data)
+
+
+if __name__ == "__main__":
+    main()
